@@ -1,0 +1,72 @@
+#!/bin/bash
+
+# usage
+prog="${0##*/}"
+usage="Syntax: $prog <recipients> <command>
+
+    Run <command> and, if the command fails, email its output (both
+    stdout and stderr) to one or more comma-delimited <recipients>.
+
+    Log the command's output to a file regardless. The path to the log
+    file is determined as follows, with \$cmd equal to the basename of
+    <command>'s executable.
+
+        * If the \$LOGFILE environment variable is set, log to that file.
+        * If the effective user id is root, log to /var/local/$prog/\$cmd.log
+        * Otherwise, log to ~/log/\$cmd.log
+
+    By default, the email's subject is \"Failure report for \`<command>\`\",
+    and its sender is \`whoami\`@\`hostname -f\`. Use the \$SUBJECT
+    and/or \$MAILFROM environment variables to override this behavior.
+"
+
+# parse args
+mailto="$1"
+shift
+
+# check args
+if [[ $# == 0 || "$mailto" != *@* || "$mailto $*" == *'--help'* ]]; then
+	echo "$usage" >&2
+	exit 1
+fi
+
+# create temp file
+trap 'rm -f "$tmpfile"' EXIT
+tmpfile="$(mktemp --tmpdir "$prog.XXXXXXXXXX")"
+
+# prep log file
+if [[ -n "$LOGFILE" ]]; then
+	logfile="$LOGFILE"
+elif (( EUID == 0 )); then
+	logfile="/var/local/$prog/${1##/*}.log"
+else
+	logfile="$HOME/log/${1##/*}.log"
+fi
+mkdir -p -m 700 "$(dirname "$logfile")"
+
+# print timestamps, run the command we were passed,
+# capture its output in a temp file,
+# and log its output in a log file
+set -o pipefail
+(
+	date +"%F %T %:z $prog: Started running \`$*\`"
+	"$@"
+	retval=$?
+	date +"%F %T %:z $prog: Finished running \`$*\`"
+	exit $retval
+) 2>&1 | tee "$tmpfile" &>> "$logfile"
+retval=$?
+set +o pipefail
+
+# check if the command failed
+if (( $retval != 0 )); then
+	# it failed, so send an email notification
+	sendmail -t <<-EOF
+		Subject: ${SUBJECT-"Failure report for \`$*\`"}
+		To: $mailto
+		From: ${MAILFROM-$(whoami)@$(hostname -f)}
+
+		$(< "$tmpfile" )
+	EOF
+fi
+
