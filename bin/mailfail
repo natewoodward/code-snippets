@@ -52,7 +52,7 @@ set -o pipefail
 	date +"%F %T %:z $prog: Started running \`$*\`"
 	"$@"
 	retval=$?
-	date +"%F %T %:z $prog: Finished running \`$*\`"
+	date +"%F %T %:z $prog: Finished running \`$*\`: Exit status $retval"
 	exit $retval
 ) 2>&1 | tee "$tmpfile" &>> "$logfile"
 retval=$?
