@@ -1,0 +1,140 @@
+#!/usr/bin/perl
+
+use strict;
+
+#use Data::Dumper;
+use File::Basename;
+
+# return unknown status to check_mk and exit
+sub exit_unknown {
+	(my $message) = @_;
+	for my $label (values %main::labels) {
+		printf("3 %s - %s\n", "$main::name.$label", $message);
+	}
+	exit 0;
+}
+
+# global variables
+my $prog = basename($0);
+my $config = "/etc/check-mk-agent/$prog.cfg";
+my $line;
+our %labels;
+my %thresholds;
+my $pid;
+
+# set defaults
+our $name = $prog;
+my $pidcmd = "pidof java";
+$name =~ s/^check_(.*)/\U\1/i;
+%labels = (
+	S0  => "SurvivorSpace0",
+	S1  => "SurvivorSpace1",
+	E   => "EdenSpace",
+	O   => "OldGen",
+	P   => "PermGen",
+	M   => "MetaSpace",
+	CCS => "CompressedClassSpace",
+);
+
+# read config
+# format is like this:
+#
+#Name: TOMCAT_MEMORY
+#PidCommand: pidof java
+#PidCommand: cat /var/run/tomcat.pid
+#PidCommand: pidof ovirt-engine
+#Label S0  : SurvivorSpace0
+#Label S1  : SurvivorSpace1
+#Label E   : EdenSpace
+#Label O   : OldGen
+#Label P   : PermGen
+#Label M   : MetaSpace
+#Label CCS : CompressedClassSpace
+#Threshold SurvivorSpace0       :
+#Threshold SurvivorSpace1       :
+#Threshold EdenSpace            :
+#Threshold OldGen               : ;98;99
+#Threshold PermGen              :
+#Threshold MetaSpace            :
+#Threshold CompressedClassSpace :
+if ( open(my $fh, '<', $config) ) {
+	while ($line = <$fh>) {
+		# skip over comments
+		if ($line =~ m/^\s*#/ || $line =~ /^\s*$/) {
+			next;
+		}
+	
+		# remove trailing comments
+		$line =~ s/\s+#.*$//;
+	
+		# parse line
+		if      ($line =~ m/^\s*Name\s*:\s*(.*)\s*/) {
+			$name = $1;
+		} elsif ($line =~ m/^\s*Label\s+(\S+)\s*:\s*(\S+)\s*/) {
+			$labels{$1} = $2;
+		} elsif ($line =~ m/^\s*Threshold\s+(\S+)\s*:\s*(\S*)\s*/) {
+			$thresholds{$1} = $2;
+		} elsif ($line =~ m/^\s*PidCommand\s*:\s*(.*)\s*/) {
+			$pidcmd = $1;
+		} else {
+			exit_unknown "Could not parse configuration directive $line";
+		}
+	}
+	close($fh);
+}
+
+# find pid
+open (my $fh, '-|', $pidcmd)
+	or exit_unknown "Could not read command output: $pidcmd";
+# read fiest line
+$line = <$fh>;
+($pid) = $line =~ /(\d+)/;
+# end of $pidcmd output
+close ($fh);
+if (!$pid =~ /^\d+$/) {
+	exit_unknown "Could not find pid in command output: $pidcmd";
+}
+
+# read jstat output
+open (my $cmd, '-|', "jstat -gc $pid")
+	or exit_unknown "Could not read command output: jstat -gc $pid";
+# read first line
+$line = <$cmd>;
+$line =~ s/^\s+|\s+$//;
+my @keys = split(/\s+/, $line);
+# read second line
+$line = <$cmd>;
+$line =~ s/^\s+|\s+$//;
+my @values = split(/\s+/, $line);
+# end of jstat output
+close $cmd;
+
+# check that we were able to parse jstat
+if (scalar @keys == 0 || scalar @values == 0 || scalar @keys != scalar @values) {
+	exit_unknown "Could not parse command output: jstat -gc $pid";
+}
+
+# put data in associative array
+my %data;
+for my $i (0 .. $#keys) {
+	$data{$keys[$i]} = $values[$i];
+}
+
+# compute data
+for my $key (keys %data) {
+	if ($key =~ /U$/) {
+		my $mem = $key;
+		$mem =~ s/U$//;
+		my $used  = $data{"${mem}U"};
+		my $total = $data{"${mem}C"};
+		my $percent = 100 * $used / $total;
+		my $label = $labels{$mem} || $mem;
+		my $threshold = $thresholds{$label};
+		printf("P %s %s=%f%%%s %s %.1f%% (%.2f / %.2f MB)\n",
+			"$name.$label",
+			$label, $percent, $threshold,
+			$label, $percent, $used/1024, $total/1024
+		);
+	}
+}
+
