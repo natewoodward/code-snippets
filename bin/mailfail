@@ -2,7 +2,7 @@
 
 # usage
 prog="${0##*/}"
-usage="Syntax: $prog <recipients> <command>
+usage="Usage: $prog <recipients> <command>
 
     Run <command> and, if the command fails, email its output (both
     stdout and stderr) to one or more comma-delimited <recipients>.
